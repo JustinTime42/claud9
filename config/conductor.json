@@ -4,6 +4,7 @@
   "messageChunkSize": 1900,
   "streamDebounceMs": 1000,
   "showToolUseMessages": true,
+  "verbosity": "normal",
   "autoApproveReadOnly": false,
   "notifyOnCompletion": true,
   "notifyOnPermission": true,

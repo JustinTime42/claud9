@@ -1,4 +1,4 @@
-import { query, type Options, type PermissionResult, type SDKMessage, type SDKAssistantMessage, type SDKResultMessage, type SDKSystemMessage } from "@anthropic-ai/claude-code";
+import { query, type Options, type PermissionResult, type SDKMessage, type SDKAssistantMessage, type SDKResultMessage, type SDKSystemMessage, type SDKPartialAssistantMessage, type SDKCompactBoundaryMessage, type SDKUserMessage } from "@anthropic-ai/claude-code";
 import { logger } from "../utils/logger.js";
 import { env } from "../config.js";
 import type {
@@ -6,7 +6,10 @@ import type {
   PermissionResponse,
   SessionStatus,
   ConductorConfig,
+  VerbosityLevel,
 } from "../bridge/types.js";
+
+const VERBOSITY_ORDER: VerbosityLevel[] = ["minimal", "normal", "verbose"];
 
 export interface SessionOptions {
   id: string;
@@ -38,6 +41,12 @@ export class Session {
   private autoApprovedTools = new Set<string>();
   private allowedTools?: string[];
   private skipPermissions: boolean;
+
+  // Streaming state (verbose mode)
+  private currentStreamMessageId: string | undefined;
+  private lastStreamUpdateTime = 0;
+  private streamBuffer = "";
+  private streamedCurrentMessage = false;
 
   // Queued user messages for multi-turn
   private messageQueue: string[] = [];
@@ -75,6 +84,11 @@ export class Session {
   private setStatus(status: SessionStatus): void {
     this.status = status;
     this.onStatusChange?.(this.id, status);
+  }
+
+  /** Check if the current verbosity level is at least the given level */
+  private atLeast(level: VerbosityLevel): boolean {
+    return VERBOSITY_ORDER.indexOf(this.config.verbosity) >= VERBOSITY_ORDER.indexOf(level);
   }
 
   /**
@@ -188,31 +202,146 @@ export class Session {
       opts.resume = this.resumeSessionId;
     }
 
+    // Enable partial messages for verbose streaming
+    if (this.atLeast("verbose")) {
+      opts.includePartialMessages = true;
+    }
+
     const conversation = query({ prompt, options: opts });
 
     let messageBuffer = "";
     let lastSendTime = 0;
 
+    // Reset streaming state for this turn
+    this.currentStreamMessageId = undefined;
+    this.lastStreamUpdateTime = 0;
+    this.streamBuffer = "";
+    this.streamedCurrentMessage = false;
+
     for await (const message of conversation) {
       if (this.abortController?.signal.aborted) break;
 
-      // Capture SDK session ID from init message
-      if (message.type === "system" && "subtype" in message && (message as SDKSystemMessage).subtype === "init") {
-        this.sdkSessionId = message.session_id;
-        if (this.sdkSessionId) {
-          this.onSdkSessionId?.(this.id, this.sdkSessionId);
+      // --- system messages ---
+      if (message.type === "system") {
+        const sysMsg = message as SDKSystemMessage;
+
+        // Capture SDK session ID from init message
+        if (sysMsg.subtype === "init") {
+          this.sdkSessionId = message.session_id;
+          if (this.sdkSessionId) {
+            this.onSdkSessionId?.(this.id, this.sdkSessionId);
+          }
+          logger.info({ sessionId: this.id, sdkSessionId: this.sdkSessionId }, "SDK session initialized");
+
+          // normal+: show init summary
+          if (this.atLeast("normal")) {
+            const lines = [`**Model:** ${this.model}`];
+            if (this.skipPermissions) lines.push("**Permissions:** bypassed");
+            if (this.allowedTools?.length) {
+              if (this.atLeast("verbose")) {
+                lines.push(`**Tools:** ${this.allowedTools.join(", ")}`);
+              } else {
+                lines.push(`**Tools:** ${this.allowedTools.length} allowed`);
+              }
+            }
+            await this.bridge.sendInfo(this.id, "Session Initialized", lines.join("\n"));
+          }
+          continue;
         }
-        logger.info({ sessionId: this.id, sdkSessionId: this.sdkSessionId }, "SDK session initialized");
+
+        // verbose: compact boundary notification
+        if (sysMsg.subtype === "compact_boundary" && this.atLeast("verbose")) {
+          const compactMsg = message as SDKCompactBoundaryMessage;
+          const trigger = compactMsg.compact_metadata?.trigger ?? "unknown";
+          const preTokens = compactMsg.compact_metadata?.pre_tokens;
+          const detail = preTokens
+            ? `Trigger: ${trigger} | Pre-compaction tokens: ${preTokens.toLocaleString()}`
+            : `Trigger: ${trigger}`;
+          await this.bridge.sendInfo(this.id, "Context Compacted", detail);
+        }
         continue;
       }
 
-      // Handle assistant messages
+      // --- stream_event (verbose only) ---
+      if (message.type === "stream_event" && this.atLeast("verbose")) {
+        const partial = message as SDKPartialAssistantMessage;
+        const event = partial.event;
+
+        if (event.type === "content_block_delta" && "delta" in event) {
+          const delta = event.delta as any;
+          if (delta.type === "text_delta" && delta.text) {
+            this.streamBuffer += delta.text;
+
+            // Debounced edit-in-place (~1/sec)
+            const now = Date.now();
+            if (now - this.lastStreamUpdateTime >= this.config.streamDebounceMs) {
+              this.currentStreamMessageId = await this.bridge.sendStreamUpdate(
+                this.id,
+                this.streamBuffer,
+                this.currentStreamMessageId,
+              );
+              this.lastStreamUpdateTime = now;
+            }
+          }
+        }
+
+        // On message_stop, finalize stream and mark as already sent
+        if (event.type === "message_stop") {
+          if (this.streamBuffer.trim()) {
+            // Final update with complete text
+            await this.bridge.sendStreamUpdate(
+              this.id,
+              this.streamBuffer,
+              this.currentStreamMessageId,
+            );
+            this.streamedCurrentMessage = true;
+          }
+          // Reset for next message
+          this.streamBuffer = "";
+          this.currentStreamMessageId = undefined;
+          this.lastStreamUpdateTime = 0;
+        }
+        continue;
+      }
+
+      // --- user messages (verbose: show tool results) ---
+      if (message.type === "user" && this.atLeast("verbose")) {
+        const userMsg = message as SDKUserMessage;
+        if (userMsg.isSynthetic && userMsg.message?.content) {
+          const content = userMsg.message.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === "tool_result" && "content" in block) {
+                const resultText = typeof block.content === "string"
+                  ? block.content
+                  : Array.isArray(block.content)
+                    ? block.content
+                        .filter((c: any) => c.type === "text")
+                        .map((c: any) => c.text)
+                        .join("\n")
+                    : "";
+                if (resultText) {
+                  const truncated = resultText.length > 300
+                    ? resultText.slice(0, 300) + "..."
+                    : resultText;
+                  await this.bridge.sendToolUse(this.id, "Result", truncated);
+                }
+              }
+            }
+          }
+        }
+        continue;
+      }
+
+      // --- assistant messages ---
       if (message.type === "assistant") {
         const assistantMsg = message as SDKAssistantMessage;
         const content = assistantMsg.message?.content;
         if (Array.isArray(content)) {
           for (const block of content) {
             if (block.type === "text" && "text" in block) {
+              // In verbose mode, skip text if already streamed
+              if (this.streamedCurrentMessage) continue;
               messageBuffer += (block as any).text;
             } else if (block.type === "tool_use") {
               // Flush any buffered text first
@@ -221,14 +350,17 @@ export class Session {
                 messageBuffer = "";
               }
 
-              // Show tool use if configured
-              if (this.config.showToolUseMessages) {
+              // Show tool use at normal+ verbosity
+              if (this.atLeast("normal")) {
                 const toolBlock = block as any;
                 const toolDetail = this.formatToolInput(toolBlock.name, toolBlock.input);
                 await this.bridge.sendToolUse(this.id, toolBlock.name, toolDetail);
               }
             }
           }
+
+          // Reset streamed flag after processing the full assistant message
+          this.streamedCurrentMessage = false;
 
           // Debounced send of text buffer
           const now = Date.now();
@@ -240,7 +372,7 @@ export class Session {
         }
       }
 
-      // Handle result messages
+      // --- result messages ---
       if (message.type === "result") {
         // Flush remaining buffer
         if (messageBuffer.trim()) {
@@ -249,15 +381,59 @@ export class Session {
         }
 
         const resultMsg = message as SDKResultMessage;
-        const costInfo = resultMsg.total_cost_usd != null
-          ? `Cost: $${resultMsg.total_cost_usd.toFixed(4)}`
-          : "";
-        const durationInfo = resultMsg.duration_ms != null
-          ? `Duration: ${(resultMsg.duration_ms / 1000).toFixed(1)}s`
-          : "";
-        const detail = [costInfo, durationInfo].filter(Boolean).join(" | ");
+        const parts: string[] = [];
 
-        await this.bridge.sendStatus(this.id, "idle", detail || "Task completed");
+        // minimal: cost + duration
+        if (resultMsg.total_cost_usd != null) {
+          parts.push(`Cost: $${resultMsg.total_cost_usd.toFixed(4)}`);
+        }
+        if (resultMsg.duration_ms != null) {
+          parts.push(`Duration: ${(resultMsg.duration_ms / 1000).toFixed(1)}s`);
+        }
+
+        // normal+: token breakdown, num_turns, error subtype, denials
+        if (this.atLeast("normal")) {
+          if (resultMsg.num_turns != null) {
+            parts.push(`Turns: ${resultMsg.num_turns}`);
+          }
+          if (resultMsg.usage) {
+            const u = resultMsg.usage;
+            const inTokens = (u as any).input_tokens ?? 0;
+            const outTokens = (u as any).output_tokens ?? 0;
+            const cacheRead = (u as any).cache_read_input_tokens ?? 0;
+            if (inTokens || outTokens) {
+              let tokenStr = `Tokens: ${inTokens.toLocaleString()} in / ${outTokens.toLocaleString()} out`;
+              if (cacheRead) tokenStr += ` (${cacheRead.toLocaleString()} cached)`;
+              parts.push(tokenStr);
+            }
+          }
+          if (resultMsg.subtype && resultMsg.subtype !== "success") {
+            parts.push(`Status: ${resultMsg.subtype}`);
+          }
+          if (resultMsg.permission_denials?.length) {
+            const denials = resultMsg.permission_denials.map(
+              (d: any) => d.tool_name ?? d.toolName ?? "unknown"
+            );
+            parts.push(`Denials: ${denials.join(", ")}`);
+          }
+        }
+
+        // verbose: per-model usage breakdown
+        if (this.atLeast("verbose") && resultMsg.modelUsage) {
+          const modelLines: string[] = [];
+          for (const [model, usage] of Object.entries(resultMsg.modelUsage)) {
+            const mu = usage as any;
+            modelLines.push(
+              `  ${model}: $${mu.costUSD?.toFixed(4) ?? "?"} (${mu.inputTokens?.toLocaleString() ?? 0} in / ${mu.outputTokens?.toLocaleString() ?? 0} out)`
+            );
+          }
+          if (modelLines.length > 0) {
+            parts.push(`Model breakdown:\n${modelLines.join("\n")}`);
+          }
+        }
+
+        const detail = parts.join(" | ") || "Task completed";
+        await this.bridge.sendStatus(this.id, "idle", detail);
       }
     }
 

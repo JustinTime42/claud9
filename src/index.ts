@@ -3,6 +3,7 @@ import { env, loadConfig } from "./config.js";
 import { logger } from "./utils/logger.js";
 import { DiscordAdapter } from "./bridge/discord-adapter.js";
 import { SessionManager } from "./core/session-manager.js";
+import type { VerbosityLevel } from "./bridge/types.js";
 
 const STATUS_EMOJI: Record<string, string> = {
   working: "\u{1F7E2}",
@@ -20,7 +21,7 @@ async function main() {
 
   // Set up command handler
   adapter.setCommandHandler(async (interaction: ChatInputCommandInteraction) => {
-    await handleCommand(interaction, manager, adapter);
+    await handleCommand(interaction, manager, adapter, config);
   });
 
   // Set up autocomplete handler for path suggestions
@@ -88,6 +89,7 @@ async function handleCommand(
   interaction: ChatInputCommandInteraction,
   manager: SessionManager,
   adapter: DiscordAdapter,
+  config: ReturnType<typeof loadConfig>,
 ): Promise<void> {
   const subcommand = interaction.options.getSubcommand();
 
@@ -113,6 +115,9 @@ async function handleCommand(
         break;
       case "projects":
         await handleProjects(interaction, manager);
+        break;
+      case "verbosity":
+        await handleVerbosity(interaction, config);
         break;
       default:
         await interaction.reply({ content: `Unknown subcommand: ${subcommand}`, ephemeral: true });
@@ -332,6 +337,20 @@ async function handleProjects(
     .setTimestamp();
 
   await interaction.reply({ embeds: [embed], ephemeral: true });
+}
+
+async function handleVerbosity(
+  interaction: ChatInputCommandInteraction,
+  config: ReturnType<typeof loadConfig>,
+): Promise<void> {
+  const level = interaction.options.getString("level", true) as VerbosityLevel;
+  const previous = config.verbosity;
+  config.verbosity = level;
+  logger.info({ previous, new: level }, "Verbosity level changed");
+  await interaction.reply({
+    content: `Verbosity changed: **${previous}** \u2192 **${level}**`,
+    ephemeral: true,
+  });
 }
 
 function getTimeAgo(isoDate: string): string {

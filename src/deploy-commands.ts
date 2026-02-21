@@ -89,6 +89,24 @@ const commands = [
       sub.setName("projects").setDescription("List configured project directories")
     )
 
+    // /claude verbosity <level>
+    .addSubcommand((sub: SlashCommandSubcommandBuilder) =>
+      sub
+        .setName("verbosity")
+        .setDescription("Set the verbosity level for session output")
+        .addStringOption((opt) =>
+          opt
+            .setName("level")
+            .setDescription("Verbosity level")
+            .setRequired(true)
+            .addChoices(
+              { name: "minimal — Final text, permissions, cost", value: "minimal" },
+              { name: "normal — + tool use, init summary, token counts", value: "normal" },
+              { name: "verbose — + streaming, tool results, compaction", value: "verbose" },
+            )
+        )
+    )
+
     .toJSON(),
 ];
 

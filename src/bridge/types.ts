@@ -3,6 +3,8 @@
  * Implement this to add support for Discord, Slack, Telegram, etc.
  */
 
+export type VerbosityLevel = "minimal" | "normal" | "verbose";
+
 export interface PermissionRequest {
   id: string;
   toolName: string;
@@ -44,6 +46,12 @@ export interface MessagingBridge {
 
   /** Send a permission request with buttons, return allow/deny */
   sendPermissionRequest(sessionId: string, request: PermissionRequest): Promise<PermissionResponse>;
+
+  /** Send an informational embed (grey, for init summaries, compaction notices, etc.) */
+  sendInfo(sessionId: string, title: string, detail: string): Promise<void>;
+
+  /** Send or edit-in-place a streaming message. Returns the message ID for subsequent edits. */
+  sendStreamUpdate(sessionId: string, text: string, messageId?: string): Promise<string>;
 
   /** Send a DM notification to the bot owner */
   sendNotification(text: string, sessionName?: string): Promise<void>;
@@ -90,7 +98,9 @@ export interface ConductorConfig {
   maxConcurrentSessions: number;
   messageChunkSize: number;
   streamDebounceMs: number;
-  showToolUseMessages: boolean;
+  /** @deprecated Use `verbosity` instead. Kept for backward compatibility. */
+  showToolUseMessages?: boolean;
+  verbosity: VerbosityLevel;
   autoApproveReadOnly: boolean;
   notifyOnCompletion: boolean;
   notifyOnPermission: boolean;

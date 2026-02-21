@@ -236,6 +236,43 @@ export class DiscordAdapter implements MessagingBridge {
     await channel.send({ embeds: [embed] });
   }
 
+  async sendInfo(sessionId: string, title: string, detail: string): Promise<void> {
+    const channel = await this.getChannel(sessionId);
+    if (!channel) return;
+
+    const truncated = detail.length > 1800 ? detail.slice(0, 1800) + "..." : detail;
+
+    const embed = new EmbedBuilder()
+      .setColor(0x95a5a6)
+      .setTitle(`\u2139\uFE0F ${title}`)
+      .setDescription(truncated)
+      .setTimestamp();
+
+    await channel.send({ embeds: [embed] });
+  }
+
+  async sendStreamUpdate(sessionId: string, text: string, messageId?: string): Promise<string> {
+    const channel = await this.getChannel(sessionId);
+    if (!channel) return messageId ?? "";
+
+    // Show the tail of the buffer so user sees current output
+    const maxLen = this.config.messageChunkSize;
+    const display = text.length > maxLen ? "..." + text.slice(-maxLen) : text;
+
+    if (messageId) {
+      try {
+        const msg = await channel.messages.fetch(messageId);
+        await msg.edit(display);
+        return messageId;
+      } catch {
+        // Message may have been deleted; send a new one
+      }
+    }
+
+    const msg = await channel.send(display);
+    return msg.id;
+  }
+
   async sendToolUse(sessionId: string, toolName: string, detail: string): Promise<void> {
     const channel = await this.getChannel(sessionId);
     if (!channel) return;

@@ -29,7 +29,7 @@ const defaultConfig: ConductorConfig = {
   maxConcurrentSessions: 5,
   messageChunkSize: 1900,
   streamDebounceMs: 1000,
-  showToolUseMessages: true,
+  verbosity: "normal",
   autoApproveReadOnly: false,
   notifyOnCompletion: true,
   notifyOnPermission: true,
@@ -40,9 +40,17 @@ const defaultConfig: ConductorConfig = {
 
 export function loadConfig(): ConductorConfig {
   const configPath = resolve("config", "conductor.json");
+  let raw: Record<string, unknown> = {};
   if (existsSync(configPath)) {
-    const raw = readFileSync(configPath, "utf-8");
-    return { ...defaultConfig, ...JSON.parse(raw) };
+    raw = JSON.parse(readFileSync(configPath, "utf-8"));
   }
-  return defaultConfig;
+
+  const config: ConductorConfig = { ...defaultConfig, ...raw } as ConductorConfig;
+
+  // Backward compat: if config has showToolUseMessages but no verbosity, infer it
+  if (!("verbosity" in raw) && "showToolUseMessages" in raw) {
+    config.verbosity = raw.showToolUseMessages ? "normal" : "minimal";
+  }
+
+  return config;
 }
