@@ -13,6 +13,12 @@ function requireEnv(name: string): string {
   return value;
 }
 
+// If an OAuth token is set (Max/Pro subscription), remove ANTHROPIC_API_KEY
+// from the process environment so the SDK subprocess uses subscription billing.
+if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+  delete process.env.ANTHROPIC_API_KEY;
+}
+
 export const env = {
   DISCORD_TOKEN: requireEnv("DISCORD_TOKEN"),
   DISCORD_CLIENT_ID: requireEnv("DISCORD_CLIENT_ID"),

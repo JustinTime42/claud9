@@ -59,8 +59,8 @@ export interface MessagingBridge {
   /** Register a handler for incoming user messages */
   onMessage(handler: (sessionId: string, text: string) => void): void;
 
-  /** Create a session channel, returns the session ID mapping */
-  createSessionChannel(sessionId: string, name: string): Promise<void>;
+  /** Create a session channel, returns the channel ID */
+  createSessionChannel(sessionId: string, name: string): Promise<string>;
 
   /** Remove/archive a session channel */
   destroySessionChannel(sessionId: string): Promise<void>;

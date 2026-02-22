@@ -97,10 +97,12 @@ export class Session {
    */
   sendMessage(text: string): void {
     if (this.messageResolver) {
+      logger.info({ sessionId: this.id }, "sendMessage: resolving pending waitForMessage");
       const resolve = this.messageResolver;
       this.messageResolver = null;
       resolve(text);
     } else {
+      logger.info({ sessionId: this.id, queueLength: this.messageQueue.length + 1 }, "sendMessage: no active listener, queuing message");
       this.messageQueue.push(text);
     }
   }
@@ -127,20 +129,18 @@ export class Session {
     this.abortController = new AbortController();
     this.setStatus("working");
 
-    await this.bridge.updateSessionStatus(this.id, "working");
-
     try {
       await this.runConversation(initialPrompt);
+      logger.info({ sessionId: this.id }, "Conversation loop exited normally");
     } catch (err: unknown) {
       if (this.abortController?.signal.aborted) {
         logger.info({ sessionId: this.id }, "Session aborted");
         this.setStatus("idle");
         return;
       }
-      logger.error({ err, sessionId: this.id }, "Session error");
+      logger.error({ err, sessionId: this.id }, "Session error (conversation loop crashed)");
       this.setStatus("error");
       await this.bridge.sendStatus(this.id, "error", String(err));
-      await this.bridge.updateSessionStatus(this.id, "error");
     }
   }
 
@@ -151,7 +151,6 @@ export class Session {
     // Multi-turn loop: after each result, wait for user's next message
     while (true) {
       this.setStatus("working");
-      await this.bridge.updateSessionStatus(this.id, "working");
 
       const result = await this.runSingleTurn(currentPrompt, isFirstTurn);
       isFirstTurn = false;
@@ -160,7 +159,6 @@ export class Session {
 
       // Post completion status
       this.setStatus("idle");
-      await this.bridge.updateSessionStatus(this.id, "idle");
 
       if (this.config.notifyOnCompletion) {
         await this.bridge.sendNotification(
@@ -171,9 +169,11 @@ export class Session {
 
       // Wait for next user message
       this.setStatus("waiting");
-      await this.bridge.updateSessionStatus(this.id, "waiting");
+      this.bridge.updateSessionStatus(this.id, "waiting").catch(() => {});
 
+      logger.info({ sessionId: this.id }, "Conversation loop: waiting for next message");
       currentPrompt = await this.waitForMessage();
+      logger.info({ sessionId: this.id, promptLength: currentPrompt.length }, "Conversation loop: message received, resuming");
 
       if (this.abortController?.signal.aborted) break;
     }
@@ -184,6 +184,8 @@ export class Session {
       abortController: this.abortController ?? undefined,
       cwd: this.projectPath,
       model: this.model,
+      // Use full path to node binary to avoid Windows spawn ENOENT issues
+      executable: process.execPath as Options["executable"],
       permissionMode: this.skipPermissions ? "bypassPermissions" : "default",
       ...(!this.skipPermissions && {
         canUseTool: (toolName: string, toolInput: Record<string, unknown>, _options: any) =>
@@ -485,7 +487,7 @@ export class Session {
 
     // Ask user via Discord
     this.setStatus("waiting");
-    await this.bridge.updateSessionStatus(this.id, "waiting");
+    this.bridge.updateSessionStatus(this.id, "waiting").catch(() => {});
 
     const request = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -502,7 +504,6 @@ export class Session {
     }
 
     this.setStatus("working");
-    await this.bridge.updateSessionStatus(this.id, "working");
 
     if (response.behavior === "allow") {
       return { behavior: "allow", updatedInput: toolInput };

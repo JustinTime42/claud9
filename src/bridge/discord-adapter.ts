@@ -163,7 +163,7 @@ export class DiscordAdapter implements MessagingBridge {
     this.reverseChannelMap.set(channelId, sessionId);
   }
 
-  async createSessionChannel(sessionId: string, name: string): Promise<void> {
+  async createSessionChannel(sessionId: string, name: string): Promise<string> {
     const channelName = `claude-${name}`.toLowerCase().replace(/[^a-z0-9-]/g, "-");
 
     // Check if channel already exists
@@ -172,7 +172,7 @@ export class DiscordAdapter implements MessagingBridge {
       this.channelMap.set(sessionId, existing.id);
       this.reverseChannelMap.set(existing.id, sessionId);
       logger.info(`Reusing existing channel: #${channelName}`);
-      return;
+      return existing.id;
     }
 
     const channel = await this.guild.channels.create({
@@ -185,6 +185,7 @@ export class DiscordAdapter implements MessagingBridge {
     this.channelMap.set(sessionId, channel.id);
     this.reverseChannelMap.set(channel.id, sessionId);
     logger.info(`Created session channel: #${channelName}`);
+    return channel.id;
   }
 
   async destroySessionChannel(sessionId: string): Promise<void> {

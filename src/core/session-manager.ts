@@ -58,14 +58,14 @@ export class SessionManager {
     const skipPermissions = options?.skipPermissions ?? preset?.skipPermissions ?? false;
 
     // Create Discord channel
-    await this.bridge.createSessionChannel(id, name);
+    const channelId = await this.bridge.createSessionChannel(id, name);
 
     // Create and store session info
     const info: SessionInfo = {
       id,
       name,
       projectPath,
-      channelId: "", // Will be set by adapter
+      channelId,
       status: "working",
       createdAt: new Date().toISOString(),
       lastActivity: new Date().toISOString(),
@@ -124,13 +124,13 @@ export class SessionManager {
   ): Promise<string> {
     const id = name;
 
-    await this.bridge.createSessionChannel(id, name);
+    const channelId = await this.bridge.createSessionChannel(id, name);
 
     const info: SessionInfo = {
       id,
       name,
       projectPath,
-      channelId: "",
+      channelId,
       status: "working",
       sdkSessionId,
       createdAt: new Date().toISOString(),
